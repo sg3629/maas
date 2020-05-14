@@ -1,0 +1,58 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Fetch local user rather than relying on (deprecated) ansible_user
+- name: Get the username running the deploy
+  local_action: command whoami
+  register: username_on_the_host
+  tags:
+    - establish_ssh_keys
+    - skip_ansible_lint
+
+# SSH Key access from the current machine to the target node is required for the
+# synchronize action to work.
+- name: Ensure User SSH Keys
+  local_action: user name='{{ username_on_the_host.stdout }}' generate_ssh_key=yes ssh_key_bits=2048
+  tags:
+    - establish_ssh_keys
+
+- name: Ensure Key Authorized on Target Head Node
+  authorized_key:
+    user: '{{ansible_user_id}}'
+    key: "{{lookup('file', '~/.ssh/id_rsa.pub')}}"
+  tags:
+    - establish_ssh_keys
+
+- name: Ensure key pair storage
+  become: yes
+  local_action: file path={{pub_ssh_key_file_location}} mode="0755" state=directory
+
+- name: Validate existing key pair
+  become: yes
+  local_action: stat path={{pub_ssh_key_file_location}}/cord_rsa
+  register: key_pair
+
+- name: Generate key pair
+  become: yes
+  local_action: command ssh-keygen -b 2048 -t rsa -N "" -C cord@cord.lab -f {{pub_ssh_key_file_location}}/cord_rsa
+  when: not key_pair.stat.exists
+
+- name: Ensure privacy of key pair
+  become: yes
+  local_action: file path="{{pub_ssh_key_file_location}}/{{item.name}}" mode="{{item.mode}}"
+  with_items:
+    - { "name": "cord_rsa", "mode": "0644" }
+    - { "name": "cord_rsa.pub", "mode": "0644" }

@@ -1,6 +1,20 @@
+// Copyright 2016 Open Networking Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
+	"bytes"
 	"math"
 	"net"
 	"strconv"
@@ -8,7 +22,7 @@ import (
 )
 
 type Storage interface {
-	Init(networkIn string, skip int) error
+	Init(networkIn string, low string, high string) error
 	Get(mac string) (string, error)
 	GetAll() map[string]string
 	Put(mac, ip string) error
@@ -23,7 +37,25 @@ type MemoryStorage struct {
 	readIdx, writeIdx, size uint
 }
 
-func (s *MemoryStorage) Init(networkIn string, skip int) error {
+func inIPRange(from net.IP, to net.IP, test net.IP) bool {
+	if from == nil || to == nil || test == nil {
+		return false
+	}
+
+	from16 := from.To16()
+	to16 := to.To16()
+	test16 := test.To16()
+	if from16 == nil || to16 == nil || test16 == nil {
+		return false
+	}
+
+	if bytes.Compare(test16, from16) >= 0 && bytes.Compare(test16, to16) <= 0 {
+		return true
+	}
+	return false
+}
+
+func (s *MemoryStorage) Init(networkIn string, low string, high string) error {
 	_, network, err := net.ParseCIDR(networkIn)
 	if err != nil {
 		return err
@@ -42,25 +74,24 @@ func (s *MemoryStorage) Init(networkIn string, skip int) error {
 	if err != nil {
 		return err
 	}
-	hostCount := int(math.Pow(2, float64(32-bits))) - skip
+	hostCount := int(math.Pow(2, float64(32-bits)))
 	s.readIdx = 0
 	s.writeIdx = 0
 	s.size = uint(hostCount)
 	s.allocated = make(map[string]IPv4)
-	s.available = make([]IPv4, hostCount)
-	for i := 0; i < skip; i += 1 {
-		ip, err = ip.Next()
-		if err != nil {
-			return err
-		}
-	}
+	s.available = make([]IPv4, 0, hostCount)
+	ipLow := net.ParseIP(low)
+	ipHigh := net.ParseIP(high)
 	for i := 0; i < hostCount; i += 1 {
-		s.available[i] = ip
+		if inIPRange(ipLow, ipHigh, net.ParseIP(ip.String())) {
+			s.available = append(s.available, ip)
+		}
 		ip, err = ip.Next()
 		if err != nil {
 			return err
 		}
 	}
+	log.Debugf("AVAILABLE: %+v\n", s.available)
 	return nil
 }
 

@@ -1,0 +1,24 @@
+#!/bin/bash
+
+BG=0
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -bg|-background)
+      BG=1
+  esac
+  shift
+done
+
+IP=$(ping -c 1 {{ controller_ip }} 2>/dev/null | grep PING | awk '{print $3}' | sed -e 's/[\(\)]//g')
+while [ "$IP x" == " x" ]; do
+  echo "Waiting for controller to resolve ({{ controller_ip }}) ... sleeping 5s and will try again ..."
+  sleep 5
+  IP=$(ping -c 1 {{ controller_ip }} 2>/dev/null | grep PING | awk '{print $3}' | sed -e 's/[\(\)]//g')
+done
+
+if [ $BG -eq 1 ]; then
+  nohup launcher ofagentapp -i {{ switch_id }} -t $IP 2>&1 > connect.log &
+else
+  launcher ofagentapp -i {{ switch_id }} -t $IP
+fi

@@ -1,0 +1,420 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+---
+- name: Ensure Prerequisites
+  apt:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - python-ethtool=0.7*
+
+- name: Establish Interface Lists
+  set_fact:
+    reboot_required: false
+    fabric_iface_list: []
+    fabric_iface_excluded_list: []
+    management_iface_list: []
+    management_iface_excluded_list: []
+  changed_when: false
+
+- name: Explicitly Ignore External and Specified Interfaces From Fabric
+  set_fact:
+    ignore_names_combined: "{{ compute_node.interfaces.external }},{{ compute_node.fabric.ignore.names }}"
+  when:
+    - compute_node.interfaces.external
+    - compute_node.fabric.ignore.names is defined and compute_node.fabric.ignore.names != omit
+  changed_when: false
+
+- name: Ignore External Interface From Fabric
+  set_fact:
+    ignore_names_combined: "{{ compute_node.interfaces.external }}"
+  when:
+    - compute_node.interfaces.external
+    - compute_node.fabric.ignore.names is not defined or compute_node.fabric.ignore.names == omit
+  changed_when: false
+
+- name: Explicity Ingnore Specified Interfaces From Fabric
+  set_fact:
+    ignore_names_combined: "{{ compute_node.fabric.ignore.names }}"
+  when:
+    - not compute_node.interfaces.external
+    - compute_node.fabric.ignore.names is defined and compute_node.fabric.ignore.names != omit
+  changed_when: false
+
+- name: Discovery Fabric Interfaces
+  netinfo:
+    include-names: "{{ compute_node.fabric.include.names }}"
+    include-module-types: "{{ compute_node.fabric.include.module_types }}"
+    include-bus-types: "{{ compute_node.fabric.include.bus_types }}"
+    ignore-names: "{{ ignore_names_combined | default(omit) }}"
+    ignore-module-types: "{{ compute_node.fabric.ignore.module_types }}"
+    ignore-bus-types: "{{ compute_node.fabric.ignore.bus_types }}"
+    exclude-names: "{{ compute_node.fabric.exclude.names }}"
+    exclude-module-types: "{{ compute_node.fabric.exclude.module_types }}"
+    exclude-bus-types: "{{ compute_node.fabric.exclude.bus_types }}"
+    debug: on
+
+- name: Gather Fabric Interfaces
+  set_fact:
+    fabric_iface_list: "{{ fabric_iface_list + [item] }}"
+  with_items:
+    - "{{ netinfo.included.keys() | sort }}"
+  changed_when: false
+
+- name: Gather Excluded Fabric Interfaces
+  set_fact:
+    fabric_iface_excluded_list: "{{ fabric_iface_excluded_list + [item] }}"
+  with_items:
+    - "{{ netinfo.excluded.keys() | sort }}"
+  changed_when: false
+
+- name: Initialize Modules Ignored for Management Bond
+  set_fact:
+    ignore_module_types_combined: "{{ compute_node.management.ignore.module_types }}"
+  changed_when: false
+
+- name: Ignore Fabric Modules for Management Bond
+  set_fact:
+    ignore_module_types_combined: "{{ compute_node.fabric.include.module_types }}"
+  when:
+    - compute_node.management.ignore.module_types is not defined or compute_node.management.ignore.module_types == omit
+    - compute_node.fabric.include.module_types is defined and compute_node.fabric.include.module_types != omit
+  changed_when: false
+
+- name: Explicitly Ignore External and Specified Interfaces From Management Bond
+  set_fact:
+    ignore_names_combined: "{{ compute_node.interfaces.external }},{{ compute_node.management.ignore.names }}"
+  when:
+    - compute_node.interfaces.external
+    - compute_node.management.ignore.names is defined and compute_node.management.ignore.names != omit
+  changed_when: false
+
+- name: Ignore External Interface From Management Bond
+  set_fact:
+    ignore_names_combined: "{{ compute_node.interfaces.external }}"
+  when:
+    - compute_node.interfaces.external
+    - compute_node.management.ignore.names is not defined or compute_node.management.ignore.names == omit
+  changed_when: false
+
+- name: Explicity Ignore Specified Interfaces From Management Bond
+  set_fact:
+    ignore_names_combined: "{{ compute_node.management.ignore.names }}"
+  when:
+    - not compute_node.interfaces.external
+    - compute_node.management.ignore.names is defined and compute_node.management.ignore.names != omit
+  changed_when: false
+
+- name: Discover Management Interfaces
+  netinfo:
+    include-names: "{{ compute_node.management.include.names }}"
+    include-module-types: "{{ compute_node.management.include.module_types }}"
+    include-bus-types: "{{ compute_node.management.include.bus_types }}"
+    ignore-names: "{{ ignore_names_combined | default(omit) }}"
+    ignore-module-types: "{{ ignore_module_types_combined | default(omit) }}"
+    ignore-bus-types: "{{ compute_node.management.ignore.bus_types }}"
+    exclude-names: "{{ compute_node.management.exclude.names }}"
+    exclude-module-types: "{{ compute_node.management.exclude.module_types }}"
+    exclude-bus-types: "{{ compute_node.management.exclude.bus_types }}"
+    debug: on
+
+- name: Gather Management Interfaces
+  set_fact:
+    management_iface_list: "{{ management_iface_list + [item] }}"
+  with_items:
+    - "{{ netinfo.included.keys() | sort }}"
+  changed_when: false
+
+- name: Gather Excluded Management Interfaces
+  set_fact:
+    management_iface_excluded_list: "{{ management_iface_excluded_list + [item] }}"
+  with_items:
+    - "{{ netinfo.excluded.keys() | sort }}"
+  changed_when: false
+
+#- name: Ensure Loopback
+#  netfile:
+#    src: "{{ compute_node.interfaces.file }}"
+#    state: present
+#    name: lo
+#    config: loopback
+#    auto: true
+#    description: "Loopback interface"
+#  register: net_changed
+
+#- name: Verify Loopback Change
+#  set_fact:
+#    reboot_required: "{{ net_changed.changed }}"
+
+- name: Ensure Fabric
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    name: fabric
+    config: static
+    auto: true
+    address: "{{ compute_node.addresses.fabric }}"
+    bond-mode: active-backup
+    bond-miimon: 100
+    bond-slaves: none
+    description: "Leaf - Spine bonded fabric interface"
+  register: net_changed
+
+- name: Verify Network Change
+  set_fact:
+    reboot_required: "{{ net_changed.changed }}"
+#    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Gather Primary Fabric Interface
+  set_fact:
+    fabric_primary_iface: "{{ fabric_iface_list | sort | first }}"
+  changed_when: false
+  when: fabric_iface_list|length > 0
+
+- name: Ensure Primary Fabric Interface
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ fabric_primary_iface }}"
+    config: manual
+    bond-master: fabric
+    bond-primary: "{{ fabric_primary_iface }}"
+    description: "Primary fabric interface"
+  register: net_changed
+  when: fabric_iface_list|length > 0
+
+- name: Verify Primary Fabric Interface Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Fabric Interfaces
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ item }}"
+    config: manual
+    bond-master: fabric
+    description: "Fabric interface"
+  register: net_changed
+  when: fabric_iface_list|length > 1 and item != fabric_primary_iface
+  with_items:
+    - "{{ fabric_iface_list | sort }}"
+
+- name: Verify Fabric Interfaces Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Mark Explicitly Excluded Fabric Interfaces as Manual
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: false
+    name: "{{ item }}"
+    config: manual
+    description: "Explicitly Excluded Fabric Interface"
+  register: net_changed
+  with_items:
+    - "{{ fabric_iface_excluded_list | sort }}"
+
+- name: Verify Fabric Interfaces Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Veth Interface
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    name: veth3
+    config: static
+    auto: true
+    address: 0.0.0.0
+    pre-up:
+      - /sbin/ip link add name veth3 type veth peer name veth2
+      - /sbin/ip link set veth2 up
+      - /sbin/brctl addif mgmtbr veth2
+    pre-down: /sbin/brctl delif mgmtbr veth2
+    post-down: /sbin/ip link del veth2
+    description: "Veth interfaces for VTN app"
+  register: net_changed
+
+- name: Verify Veth Interface Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Management Bridge DHCP
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    name: mgmtbr
+    config: "dhcp"
+    auto: true
+    bridge_ports: "mgmtbond veth2"
+    description: "Internal POD management bridge"
+  register: net_changed
+  when: compute_node.addresses.management == "dhcp"
+
+- name: Verify Management Bridge DHCP Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Management Bridge STATIC
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    name: mgmtbr
+    config: static
+    auto: true
+    address: "{{ compute_node.addresses.management }}"
+    gateway: "{{ compute_node.gateway.management }}"
+    broadcast: "{{ compute_node.broadcast.management }}"
+    bridge_ports: "mgmtbond veth2"
+    description: "Internal POD management bridge"
+  register: net_changed
+  when: compute_node.addresses.management != "dhcp"
+
+- name: Verify Management Bridge STATIC Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Management Bond
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    name: mgmtbond
+    config: "manual"
+    auto: true
+    bond-mode: active-backup
+    bond-miimon: 100
+    bond-slaves: none
+    description: "Internal POD management bond"
+  register: net_changed
+
+- name: Verify Management Bond DHCP Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Gather Primary Management Interface
+  set_fact:
+    management_primary_iface: "{{ management_iface_list | sort | first }}"
+  changed_when: false
+  when: management_iface_list|length > 0
+
+- name: Ensure Primary Management Interface
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ management_primary_iface }}"
+    config: manual
+    bond-master: mgmtbond
+    bond-primary: "{{ management_primary_iface }}"
+    description: "Primary management interface"
+  register: net_changed
+  when: management_iface_list|length > 0
+
+- name: Verify Primary Management Interface Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure Management Interfaces
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ item }}"
+    config: manual
+    bond-master: mgmtbond
+    description: "Management interface"
+  register: net_changed
+  when: management_iface_list|length > 1 and item != management_primary_iface
+  with_items:
+    - "{{ management_iface_list | sort }}"
+
+- name: Verify Management Interfaces Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Mark Explicitly Excluded Management Bond Interfaces as Manual
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: false
+    name: "{{ item }}"
+    config: manual
+    description: "Explicitly Excluded Management Bond Interface"
+  register: net_changed
+  with_items:
+    - "{{ management_iface_excluded_list | sort }}"
+
+- name: Verify Explicitly Excluded Management Interfaces Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure External Interface DHCP
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ compute_node.interfaces.external }}"
+    config: dhcp
+    description: "External interface from POD to Internet (uplink)"
+  register: net_changed
+  when: compute_node.interfaces.external and compute_node.addresses.external == "dhcp"
+
+- name: Verify External Interface DHCP Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Ensure External Interface STATIC
+  netfile:
+    src: "{{ compute_node.interfaces.file }}"
+    state: present
+    auto: true
+    name: "{{ compute_node.interfaces.external }}"
+    config: static
+    address: "{{ compute_node.addresses.external }}"
+    gateway: "{{ compute_node.gateway.external }}"
+    broadcast: "{{ compute_node.broadcast.external }}"
+    description: "External interface from POD to Internet (uplink)"
+  register: net_changed
+  when: compute_node.interfaces.external and compute_node.addresses.external != "dhcp"
+
+- name: Verify External Interface STATIC Changed
+  set_fact:
+    reboot_required: "{{ reboot_required }} or {{ net_changed.changed }}"
+
+- name: Reboot Required
+  command: /sbin/reboot
+  async: 0
+  poll: 0
+  ignore_errors: true
+  when: reboot_required
+  tags:
+    - interface_config
+    - reboot
+
+- name: Wait For Restart
+  wait_for_connection:
+    delay: 120
+    timeout: 600
+    connect_timeout: 15
+  when: reboot_required
+  tags:
+    - interface_config
+    - reboot

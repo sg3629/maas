@@ -1,11 +1,22 @@
+// Copyright 2016 Open Networking Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
+	"net"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -33,23 +44,24 @@ type Power struct {
 	PowerAddress  string `json:"power_address"`
 }
 
+type HostFilter struct {
+	Zones struct {
+		Include []string `json:"include,omitempty"`
+		Exclude []string `json:"exclude,omitempty"`
+	} `json:"zones,omitempty"`
+	Hosts struct {
+		Include []string `json:"include,omitempty"`
+		Exclude []string `json:"exclude,omitempty"`
+	} `json:"hosts,omitempty"`
+}
+
 // ProcessingOptions used to determine on what hosts to operate
 type ProcessingOptions struct {
-	Filter struct {
-		Zones struct {
-			Include []string
-			Exclude []string
-		}
-		Hosts struct {
-			Include []string
-			Exclude []string
-		}
-	}
-	Mappings        map[string]interface{}
-	Verbose         bool
+	Filter          HostFilter
+	Mappings        map[string]string
 	Preview         bool
 	AlwaysRename    bool
-	ProvTracker     Tracker
+	Provisioner     Provisioner
 	ProvisionURL    string
 	ProvisionTTL    time.Duration
 	PowerHelper     string
@@ -87,7 +99,7 @@ var Transitions = map[string]map[string][]Action{
 const (
 	// defaultStateMachine Would be nice to drive from a graph language
 	defaultStateMachine string = `
-	(New)->(Commissioning)
+        (New)->(Commissioning)
         (Commissioning)->(FailedCommissioning)
         (FailedCommissioning)->(New)
         (Commissioning)->(Ready)
@@ -107,14 +119,12 @@ const (
         (DiskErasing)->(Ready)
         (Broken)->(Ready)
         (Deployed)->(Provisioning)
-	(Provisioning)->|a|
-	|a|->(Execute Script)->|b|
-	|a|->(HTTP PUT)
-	(HTTP PUT)->(HTTP GET)
-	(HTTP GET)->(HTTP GET)
-	(HTTP GET)->|b|
-	|b|->(Provisioned)
-	|b|->(ProvisionError)
+        (Provisioning)->(HTTP PUT)
+        (HTTP PUT)->(HTTP GET)
+        (HTTP GET)->(HTTP GET)
+        (HTTP GET)->|b|
+        |b|->(Provisioned)
+        |b|->(ProvisionError)
         (ProvisionError)->(Provisioning)`
 )
 
@@ -128,14 +138,14 @@ func updateNodeName(client *maas.MAASObject, node MaasNode, options ProcessingOp
 		current = current[:i]
 	}
 	for _, mac := range macs {
-		if entry, ok := options.Mappings[mac]; ok {
-			if name, ok := entry.(map[string]interface{})["hostname"]; ok && current != name.(string) {
+		if name, ok := options.Mappings[mac]; ok {
+			if current != name {
 				nodesObj := client.GetSubObject("nodes")
 				nodeObj := nodesObj.GetSubObject(node.ID())
-				log.Printf("RENAME '%s' to '%s'\n", node.Hostname(), name.(string))
+				log.Infof("RENAME '%s' to '%s'\n", node.Hostname(), name)
 
 				if !options.Preview {
-					nodeObj.Update(url.Values{"hostname": []string{name.(string)}})
+					nodeObj.Update(url.Values{"hostname": []string{name}})
 				}
 			}
 		}
@@ -145,209 +155,87 @@ func updateNodeName(client *maas.MAASObject, node MaasNode, options ProcessingOp
 
 // Reset we are at the target state, nothing to do
 var Reset = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	if options.Verbose {
-		log.Printf("RESET: %s", node.Hostname())
-	}
+	log.Debugf("RESET: %s", node.Hostname())
 
 	if options.AlwaysRename {
 		updateNodeName(client, node, options)
 	}
 
-	options.ProvTracker.Clear(node.ID())
-
-	return nil
+	err := options.Provisioner.Clear(node.ID())
+	if err != nil {
+		log.Errorf("Attempting to clear provisioning state of node '%s' : %s", node.ID(), err)
+	}
+	return err
 }
 
 // Provision we are at the target state, nothing to do
 var Provision = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	if options.Verbose {
-		log.Printf("CHECK PROVISION: %s", node.Hostname())
-	}
+	log.Debugf("CHECK PROVISION: %s", node.Hostname())
 
 	if options.AlwaysRename {
 		updateNodeName(client, node, options)
 	}
 
-	record, err := options.ProvTracker.Get(node.ID())
+	record, err := options.Provisioner.Get(node.ID())
 	if err != nil {
-		log.Printf("[warn] unable to retrieve provisioning state of node '%s' : %s", node.Hostname(), err)
-	} else if record.State == Unprovisioned || record.State == ProvisionError {
-		if options.Verbose {
-			log.Printf("[info] Current state of node '%s' is '%s'", node.Hostname(), record.State.String())
+		log.Warningf("unable to retrieve provisioning state of node '%s' : %s", node.Hostname(), err)
+	} else if record == nil || record.Status == Failed {
+		var label string
+		if record == nil {
+			label = "NotFound"
+		} else {
+			label = record.Status.String()
 		}
-		var err error = nil
-		var callout *url.URL
-		log.Printf("PROVISION '%s'", node.Hostname())
-		if len(options.ProvisionURL) > 0 {
-			if options.Verbose {
-				log.Printf("[info] Provisioning callout to '%s'", options.ProvisionURL)
-			}
-			callout, err = url.Parse(options.ProvisionURL)
-			if err != nil {
-				log.Printf("[error] Failed to parse provisioning URL '%s' : %s", options.ProvisionURL, err)
-			} else {
-				ips := node.IPs()
-				ip := ""
-				if len(ips) > 0 {
-					ip = ips[0]
-				}
-				macs := node.MACs()
-				mac := ""
-				if len(macs) > 0 {
-					mac = macs[0]
-				}
-				switch callout.Scheme {
-				// If the scheme is a file, then we will execute the refereced file
-				case "", "file":
-					if options.Verbose {
-						log.Printf("[info] executing local script file '%s'", callout.Path)
-					}
-					record.State = Provisioning
-					record.Timestamp = time.Now().Unix()
-					options.ProvTracker.Set(node.ID(), record)
-					err = exec.Command(callout.Path, node.ID(), node.Hostname(), ip, mac).Run()
-					if err != nil {
-						log.Printf("[error] Failed to execute '%s' : %s", options.ProvisionURL, err)
-					} else {
-						if options.Verbose {
-							log.Printf("[info] Marking node '%s' with ID '%s' as provisioned",
-								node.Hostname(), node.ID())
-						}
-						record.State = Provisioned
-						options.ProvTracker.Set(node.ID(), record)
-					}
-
-				default:
-					if options.Verbose {
-						log.Printf("[info] POSTing to '%s'", options.ProvisionURL)
-					}
-					data := map[string]string{
-						"id":   node.ID(),
-						"name": node.Hostname(),
-						"ip":   ip,
-						"mac":  mac,
-					}
-					hc := http.Client{}
-					var b []byte
-					b, err = json.Marshal(data)
-					if err != nil {
-						log.Printf("[error] Unable to marshal node data : %s", err)
-					} else {
-						var req *http.Request
-						var resp *http.Response
-						if options.Verbose {
-							log.Printf("[debug] POSTing data '%s'", string(b))
-						}
-						req, err = http.NewRequest("POST", options.ProvisionURL, bytes.NewReader(b))
-						if err != nil {
-							log.Printf("[error] Unable to construct POST request to provisioner : %s",
-								err)
-						} else {
-							req.Header.Add("Content-Type", "application/json")
-							resp, err = hc.Do(req)
-							if err != nil {
-								log.Printf("[error] Unable to process POST request : %s",
-									err)
-							} else {
-								defer resp.Body.Close()
-								if resp.StatusCode == http.StatusAccepted {
-									record.State = Provisioning
-								} else {
-									record.State = ProvisionError
-								}
-								record.Timestamp = time.Now().Unix()
-								options.ProvTracker.Set(node.ID(), record)
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if err != nil {
-			if options.Verbose {
-				log.Printf("[warn] Not marking node '%s' with ID '%s' as provisioned, because of error '%s'",
-					node.Hostname(), node.ID(), err)
-				record.State = ProvisionError
-				options.ProvTracker.Set(node.ID(), record)
-			}
-		}
-	} else if record.State == Provisioning && time.Since(time.Unix(record.Timestamp, 0)) > options.ProvisionTTL {
-		log.Printf("[error] Provisioning of node '%s' has passed provisioning TTL of '%v'",
-			node.Hostname(), options.ProvisionTTL)
-		record.State = ProvisionError
-		options.ProvTracker.Set(node.ID(), record)
-	} else if record.State == Provisioning {
-		callout, err := url.Parse(options.ProvisionURL)
-		if err != nil {
-			log.Printf("[error] Unable to parse provisioning URL '%s' : %s", options.ProvisionURL, err)
-		} else if callout.Scheme != "file" {
-			var req *http.Request
-			var resp *http.Response
-			if options.Verbose {
-				log.Printf("[info] Fetching provisioning state for node '%s'", node.Hostname())
-			}
-			req, err = http.NewRequest("GET", options.ProvisionURL+"/"+node.ID(), nil)
-			if err != nil {
-				log.Printf("[error] Unable to construct GET request to provisioner : %s", err)
-			} else {
-				hc := http.Client{}
-				resp, err = hc.Do(req)
-				if err != nil {
-					log.Printf("[error] Failed to quest provision state for node '%s' : %s",
-						node.Hostname(), err)
+		log.Debugf("Current state of node '%s' is '%s'", node.Hostname(), label)
+		ips := node.IPs()
+		ip := ""
+		if len(ips) > 0 {
+			ip = ips[0]
+		} else {
+			// An IP is required by the provisioner, so if we don't have one then attempt
+			// to resolve the name
+			log.Debugf("MAAS did not return the IP address of host '%s', attempting to resolve independently",
+				node.Hostname())
+			addrs, err := net.LookupHost(node.Hostname())
+			if err != nil || len(addrs) == 0 {
+				log.Errorf("Unable to determine IP address of '%s', thus unable to provision node '%s'",
+					node.Hostname(), node.ID())
+				if err == nil {
+					err = fmt.Errorf("Unable to determine IP address of host '%s'", node.Hostname)
 				} else {
-					defer resp.Body.Close()
-					if options.Verbose {
-						log.Printf("[debug] Got status '%s' for node '%s'", resp.Status, node.Hostname())
-					}
-					switch resp.StatusCode {
-					case http.StatusOK: // provisioning completed or failed
-						decoder := json.NewDecoder(resp.Body)
-						var raw interface{}
-						err = decoder.Decode(&raw)
-						if err != nil {
-							log.Printf("[error] Unable to unmarshal response from provisioner for '%s': %s",
-								node.Hostname(), err)
-						}
-						status := raw.(map[string]interface{})
-						switch int(status["status"].(float64)) {
-						case 0, 1: // PENDING, RUNNING ... should never really get here
-							// noop, already in this state
-						case 2: // COMPLETE
-							if options.Verbose {
-								log.Printf("[info] Marking node '%s' with ID '%s' as provisioned",
-									node.Hostname(), node.ID())
-							}
-							record.State = Provisioned
-							options.ProvTracker.Set(node.ID(), record)
-						case 3: // FAILED
-							if options.Verbose {
-								log.Printf("[info] Marking node '%s' with ID '%s' as failed provisioning",
-									node.Hostname(), node.ID())
-							}
-							record.State = ProvisionError
-							options.ProvTracker.Set(node.ID(), record)
-						default:
-							log.Printf("[error] unknown status state for node '%s' : %d",
-								node.Hostname(), int(status["status"].(float64)))
-						}
-					case http.StatusAccepted: // in the provisioning state
-						// Noop, presumably alread in this state
-					case http.StatusNotFound:
-						// Noop, but not an error
-					default: // Consider anything else an erorr
-						log.Printf("[warn] Node '%s' with ID '%s' failed provisioning, will retry",
-							node.Hostname(), node.ID())
-						record.State = ProvisionError
-						options.ProvTracker.Set(node.ID(), record)
-					}
+					err = fmt.Errorf("Unable to determine IP address of host '%s' : %s",
+						node.Hostname, err)
 				}
+				return err
 			}
+			ip = addrs[0]
+			log.Debugf("Resolved hostname '%s' to IP address '%s'", node.Hostname(), ip)
 		}
-	} else if options.Verbose {
-		log.Printf("[info] Not invoking provisioning for '%s', current state is '%s'", node.Hostname(),
-			record.State.String())
+		macs := node.MACs()
+		mac := ""
+		if len(macs) > 0 {
+			mac = macs[0]
+		}
+		log.Debugf("POSTing '%s' (%s) to '%s'", node.Hostname(), node.ID(), options.ProvisionURL)
+		err = options.Provisioner.Provision(&ProvisionRequest{
+			Id:   node.ID(),
+			Name: node.Hostname(),
+			Ip:   ip,
+			Mac:  mac,
+		})
+
+		if err != nil {
+			log.Errorf("unable to provision '%s' (%s) : %s", node.ID(), node.Hostname(), err)
+		}
+
+	} else if options.ProvisionTTL > 0 &&
+		record.Status == Running && time.Since(time.Unix(record.Timestamp, 0)) > options.ProvisionTTL {
+		log.Errorf("Provisioning of node '%s' has passed provisioning TTL of '%v'",
+			node.Hostname(), options.ProvisionTTL)
+		options.Provisioner.Clear(node.ID())
+	} else {
+		log.Debugf("Not invoking provisioning for '%s', current state is '%s'", node.Hostname(),
+			record.Status.String())
 	}
 
 	return nil
@@ -359,9 +247,7 @@ var Done = func(client *maas.MAASObject, node MaasNode, options ProcessingOption
 	// log this fact unless we are in verbose mode. I suspect it would be
 	// nice to log it once when the device transitions from a non COMPLETE
 	// state to a complete state, but that would require keeping state.
-	if options.Verbose {
-		log.Printf("COMPLETE: %s", node.Hostname())
-	}
+	log.Debugf("COMPLETE: %s", node.Hostname())
 
 	if options.AlwaysRename {
 		updateNodeName(client, node, options)
@@ -372,7 +258,7 @@ var Done = func(client *maas.MAASObject, node MaasNode, options ProcessingOption
 
 // Deploy cause a node to deploy
 var Deploy = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	log.Printf("DEPLOY: %s", node.Hostname())
+	log.Infof("DEPLOY: %s", node.Hostname())
 
 	if options.AlwaysRename {
 		updateNodeName(client, node, options)
@@ -385,7 +271,7 @@ var Deploy = func(client *maas.MAASObject, node MaasNode, options ProcessingOpti
 		// a parameter default
 		_, err := myNode.CallPost("start", url.Values{"distro_series": []string{"trusty"}})
 		if err != nil {
-			log.Printf("ERROR: DEPLOY '%s' : '%s'", node.Hostname(), err)
+			log.Errorf("DEPLOY '%s' : '%s'", node.Hostname(), err)
 			return err
 		}
 	}
@@ -394,7 +280,7 @@ var Deploy = func(client *maas.MAASObject, node MaasNode, options ProcessingOpti
 
 // Aquire aquire a machine to a specific operator
 var Aquire = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	log.Printf("AQUIRE: %s", node.Hostname())
+	log.Infof("AQUIRE: %s", node.Hostname())
 	nodesObj := client.GetSubObject("nodes")
 
 	if options.AlwaysRename {
@@ -488,7 +374,7 @@ var Aquire = func(client *maas.MAASObject, node MaasNode, options ProcessingOpti
 		_, err = nodesObj.CallPost("acquire",
 			url.Values{"name": []string{node.Hostname()}})
 		if err != nil {
-			log.Printf("ERROR: AQUIRE '%s' : '%s'", node.Hostname(), err)
+			log.Errorf("AQUIRE '%s' : '%s'", node.Hostname(), err)
 			return err
 		}
 	}
@@ -505,21 +391,21 @@ var Commission = func(client *maas.MAASObject, node MaasNode, options Processing
 	switch state {
 	case "on":
 		// Attempt to turn the node off
-		log.Printf("POWER DOWN: %s", node.Hostname())
+		log.Infof("POWER DOWN: %s", node.Hostname())
 		if !options.Preview {
 			//POST /api/1.0/nodes/{system_id}/ op=stop
 			nodesObj := client.GetSubObject("nodes")
 			nodeObj := nodesObj.GetSubObject(node.ID())
 			_, err := nodeObj.CallPost("stop", url.Values{"stop_mode": []string{"soft"}})
 			if err != nil {
-				log.Printf("ERROR: Commission '%s' : changing power start to off : '%s'", node.Hostname(), err)
+				log.Errorf("Commission '%s' : changing power start to off : '%s'", node.Hostname(), err)
 			}
 			return err
 		}
 		break
 	case "off":
 		// We are off so move to commissioning
-		log.Printf("COMISSION: %s", node.Hostname())
+		log.Infof("COMISSION: %s", node.Hostname())
 		if !options.Preview {
 			nodesObj := client.GetSubObject("nodes")
 			nodeObj := nodesObj.GetSubObject(node.ID())
@@ -528,14 +414,14 @@ var Commission = func(client *maas.MAASObject, node MaasNode, options Processing
 
 			_, err := nodeObj.CallPost("commission", url.Values{})
 			if err != nil {
-				log.Printf("ERROR: Commission '%s' : '%s'", node.Hostname(), err)
+				log.Errorf("Commission '%s' : '%s'", node.Hostname(), err)
 			}
 			return err
 		}
 		break
 	default:
 		// We are in a state from which we can't move forward.
-		log.Printf("[warn]: %s has invalid power state '%s'", node.Hostname(), state)
+		log.Warningf("%s has invalid power state '%s'", node.Hostname(), state)
 
 		// If a power helper script is set, we have an unknown power state, and
 		// we have not power type then attempt to use the helper script to discover
@@ -546,14 +432,14 @@ var Commission = func(client *maas.MAASObject, node MaasNode, options Processing
 					node.MACs()...)...)
 			stdout, err := cmd.Output()
 			if err != nil {
-				log.Printf("[error] Failed while executing power helper script '%s' : %s",
+				log.Errorf("Failed while executing power helper script '%s' : %s",
 					options.PowerHelper, err)
 				return err
 			}
 			power := Power{}
 			err = json.Unmarshal(stdout, &power)
 			if err != nil {
-				log.Printf("[error] Failed to parse output of power helper script '%s' : %s",
+				log.Errorf("Failed to parse output of power helper script '%s' : %s",
 					options.PowerHelper, err)
 				return err
 			}
@@ -566,7 +452,7 @@ var Commission = func(client *maas.MAASObject, node MaasNode, options Processing
 				}
 				node.UpdatePowerParameters(power.Name, params)
 			default:
-				log.Printf("[warn] Unsupported power type discovered '%s'", power.Name)
+				log.Warningf("Unsupported power type discovered '%s'", power.Name)
 			}
 		}
 		break
@@ -576,32 +462,32 @@ var Commission = func(client *maas.MAASObject, node MaasNode, options Processing
 
 // Wait a do nothing state, while work is being done
 var Wait = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	log.Printf("WAIT: %s", node.Hostname())
+	log.Infof("WAIT: %s", node.Hostname())
 	return nil
 }
 
 // Fail a state from which we cannot, currently, automatically recover
 var Fail = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	log.Printf("FAIL: %s", node.Hostname())
+	log.Infof("FAIL: %s", node.Hostname())
 	return nil
 }
 
 // AdminState an administrative state from which we should make no automatic transition
 var AdminState = func(client *maas.MAASObject, node MaasNode, options ProcessingOptions) error {
-	log.Printf("ADMIN: %s", node.Hostname())
+	log.Infof("ADMIN: %s", node.Hostname())
 	return nil
 }
 
 func findActions(target string, current string) ([]Action, error) {
 	targets, ok := Transitions[target]
 	if !ok {
-		log.Printf("[warn] unable to find transitions to target state '%s'", target)
+		log.Warningf("unable to find transitions to target state '%s'", target)
 		return nil, fmt.Errorf("Could not find transition to target state '%s'", target)
 	}
 
 	actions, ok := targets[current]
 	if !ok {
-		log.Printf("[warn] unable to find transition from current state '%s' to target state '%s'",
+		log.Warningf("unable to find transition from current state '%s' to target state '%s'",
 			current, target)
 		return nil, fmt.Errorf("Could not find transition from current state '%s' to target state '%s'",
 			current, target)
@@ -615,7 +501,7 @@ func ProcessActions(actions []Action, client *maas.MAASObject, node MaasNode, op
 	var err error
 	for _, action := range actions {
 		if err = action(client, node, options); err != nil {
-			log.Printf("[error] Error while processing action for node '%s' : %s",
+			log.Errorf("Error while processing action for node '%s' : %s",
 				node.Hostname(), err)
 			break
 		}
@@ -690,16 +576,12 @@ func ProcessAll(client *maas.MAASObject, nodes []MaasNode, options ProcessingOpt
 					errors[i] = nil
 				}
 			} else {
-				if options.Verbose {
-					log.Printf("[info] ignoring node '%s' as its zone '%s' didn't match include zone name filter '%v'",
-						node.Hostname(), node.Zone(), options.Filter.Zones.Include)
-				}
+				log.Debugf("ignoring node '%s' as its zone '%s' didn't match include zone name filter '%v'",
+					node.Hostname(), node.Zone(), options.Filter.Zones.Include)
 			}
 		} else {
-			if options.Verbose {
-				log.Printf("[info] ignoring node '%s' as it didn't match include hostname filter '%v'",
-					node.Hostname(), options.Filter.Hosts.Include)
-			}
+			log.Debugf("ignoring node '%s' as it didn't match include hostname filter '%v'",
+				node.Hostname(), options.Filter.Hosts.Include)
 		}
 	}
 	return errors

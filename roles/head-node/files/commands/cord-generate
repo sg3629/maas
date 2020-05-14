@@ -1,0 +1,34 @@
+#!/bin/bash
+#D provides access to the CORD POD fabric configuration generation
+
+PROG=$(echo $(basename $0) | sed -e 's/^cord-/cord /g')
+
+usage() {
+    echo "usage: $PROG [options]"
+    echo "    -hc|--host-count      number of hosts to expect to find in ONOS"
+    echo "    -sc|--switch-count    number of switches to expect to find in ONOS"
+    echo "    -h|--help             this message"
+}
+
+HOST_COUNT=0
+SWITCH_COUNT=0
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -hc|--host-count)
+            shift
+	    HOST_COUNT=$1
+	    ;;
+	-sc|--switch-count)
+	    shift
+	    SWITCH_COUNT=$1
+	    ;;
+        -h|--help)
+	    usage
+	    exit 0
+	    ;;
+    esac
+    shift
+done
+
+exec curl --fail -sSL -XPOST http://$CORD_HEAD_NODE:4245/config/ -d "{\"hostcount\":$HOST_COUNT,\"switchcount\":$SWITCH_COUNT}"

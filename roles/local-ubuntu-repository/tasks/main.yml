@@ -1,0 +1,62 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+---
+- name: Ensure Local Repository Settings
+  become: yes
+  template:
+    backup: yes
+    dest: /etc/apt/sources.list
+    src: sources.list.j2
+    group: root
+    owner: root
+    mode: "0644"
+  when: ubuntu_apt_repo is defined
+
+- name: Capture Existing Respositories
+  command: find /etc/apt/sources.list.d \! -type d -name '*.list'
+  changed_when: false
+  register: existing_repo_lists
+  when: ubuntu_apt_repo is defined
+
+- name: Capture Timestamp
+  set_fact:
+    timestamp: "{{ lookup('pipe', 'date +%Y-%m-%d@%H:%M:%S') }}"
+  changed_when: false
+  when: ubuntu_apt_repo is defined
+
+- name: Backup Existing Respositories
+  become: yes
+  copy:
+    remote_src: True
+    src:  "{{ item }}"
+    dest: "{{ item }}.{{ timestamp }}~"
+  with_items: "{{ existing_repo_lists['stdout_lines'] | default([])  }}"
+  when: ubuntu_apt_repo is defined
+
+- name: Remove Existing Repositories
+  become: yes
+  file:
+    state: absent
+    path: "{{ item }}"
+  with_items: "{{ existing_repo_lists['stdout_lines'] | default([]) }}"
+  when: ubuntu_apt_repo is defined
+
+- name: Ensure Update Repository List
+  become: yes
+  apt:
+    update_cache: yes
+  when: ubuntu_apt_repo is defined

@@ -1,45 +1,54 @@
 ---
-- name: Openflow Agent Debian Archive
-  get_url:
-    url: http://github.com/ciena/ZeroTouchProvisioning/raw/master/ofdpa-i.12.1.1_12.1.1%2Baccton1.7-1_amd64.deb
-    validate_certs: false
-    dest: /mnt/flash2/ofdpa-i.12.1.1_12.1.1%2Baccton1.7-1_amd64.deb
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-- name: Verify Service Exists
-  stat:
-    path: /etc/init.d/ofdpa
-  register: ofdpa_stat
-  changed_when: false
-  failed_when: false
+- name: Verify Openflow Agent
+  shell: which ofagentapp | wc -w
+  register: ofdpa_exists
+  tags:
+    - skip_ansible_lint # We're just gathering info
 
-- name: OpenFlow Agent Stopped
-  service: name=ofdpa state=stopped
-  when: ofdpa_stat.stat.exists
+- name: Install OFDPA for Accton switches
+  include: ofdpa-accton.yml
+  when:
+    - platform in platforms.accton_switches.names
+    - ofdpa_exists.stdout == "0"
 
-- name: Verify Distributeion Release File
-  stat:
-    path: /etc/lsb-release
-  register: lsb_stat
-  changed_when: false
-  failed_when: false
+- name: Install OFDPA for Quanta switches
+  include: ofdpa-quanta.yml
+  when:
+    - platform in platforms.quanta_switches.names
+    - ofdpa_exists.stdout == "0"
 
-- name: Verify Distribute Name
-  shell: grep -i ubuntu /etc/lsb-release | wc -l
-  register: dist
-  changed_when: false
-  failed_when: false
+- name: Generate DPID
+  shell: ifconfig | grep HWaddr | head -1 | awk '{ print "0x0000"$5 }' | sed s/://g
+  register: dpid
+  tags:
+    - skip_ansible_lint # We're just gathering info
 
-- name: Openflow Agent
-  apt: deb="/mnt/flash2/ofdpa-i.12.1.1_12.1.1%2Baccton1.7-1_amd64.deb" force=true
-  when: not lsb_stat.stat.exists or dist.stdout == "0"
+- name: Ensure OFDPA Config
+  set_fact:
+    switch_id: "{{ dpid.stdout }}"
+    controller_ip: "onos-fabric"
 
-- name: OpenFlow Agent Started
-  service: name=ofdpa state=started
-  when: not lsb_stat.stat.exists or dist.stdout == "0"
-
-- name: Mark Persist Openflow Agent
-  command: persist /etc/accton/ofdpa.conf
-
-- name: Persist Openflow Agent
-  command: savepersist
-  failed_when: false
+- name: Utilities Scripts
+  template:
+    src: "{{ item }}"
+    dest: /root
+    owner: root
+    group: root
+    mode: "0755"
+  with_items:
+    - killit
+    - connect

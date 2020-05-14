@@ -1,16 +1,30 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 ---
 - name: Copy i40e Interface Driver
   unarchive:
     src=files/i40e-1.4.25.tar.gz
-    dest=/home/{{ ansible_user }}
-    owner={{ ansible_user }}
-    group={{ ansible_user }}
+    dest=/home/{{ ansible_user_id }}
 
 - name: Build i40e Driver
   command: make
   args:
     chdir: i40e-1.4.25/src
-    creates: /home/{{ ansible_user }}/i40e-1.4.25/src/i40e/i40e.ko
+    creates: /home/{{ ansible_user_id }}/i40e-1.4.25/src/i40e/i40e.ko
 
 - name: Unload i40e Driver
   become: yes
@@ -21,6 +35,7 @@
   command: make install
   args:
     chdir: i40e-1.4.25/src
+  changed_when: true
 
 - name: Load i40e Driver
   become: yes
@@ -36,5 +51,5 @@
 
 - name: Remove Build Files
   file:
-    path=/home/{{ ansible_user }}/i40e-1.4.25
+    path=/home/{{ ansible_user_id }}/i40e-1.4.25
     state=absent

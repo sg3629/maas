@@ -1,71 +1,118 @@
 ---
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+- name: Verify Network Bits on Network Specifications
+  fail: msg="Network specification '{{ item }}' must include network bits"
+  when: "item | match('^([0-9]{1,3}.){3}[0-9]{1,3}$')"
+  with_items:
+    - "{{ networks.management }}"
+    - "{{ networks.bridge }}"
+    - "{{ networks.fabric }}"
+
+- name: Ensure Management Bridge Interface
+  become: yes
+  command: ifconfig mgmtbr
+  register: have_mgmtbr
+  failed_when: false
+  changed_when: false
+
+- name: Verify Management Bridge
+  fail: msg="The head node must have a network bridge named 'mgmtbr' to continue the deployment. Please see docuemataiton at 'http://github.com/opencord/cord'."
+  when: have_mgmtbr.rc != 0
+
 - name: Install Prerequisites
   become: yes
-  apt: name={{ item }} state=latest force=true
+  apt: name={{ item }} state=present force=true
   with_items:
-    - git
-    - bridge-utils
-    - curl
-    - python-pycurl
-    - python-pip
-    - ethtool
+    - git=1:1.9.*
+    - bridge-utils=1.5-*
+    - curl=7.35.*
+    - python-pycurl=7.19.*
+    - python-pip=1.5.4*
+    - ethtool=1:3.13*
+    - jq=1.3*
 
-- name: Install Python Prerequisites
+- name: Ensure Docker Ansible Support
   become: yes
-  pip: name={{ item }} state=latest
+  pip:
+    name: "docker==3.2.1"
+
+- name: Stop Containers
+  become: yes
+  docker_container:
+    name: "{{ item.name }}"
+    image: "{{ item.image }}"
+    state: absent
   with_items:
-    - docker-py
-
-- name: Stop MAAS Switchq Container
-  become: yes
-  docker:
-    name: switchq
-    image: opencord/cord-maas-switchq:latest
-    state: absent
-
-- name: Stop MAAS Automation Container
-  become: yes
-  docker:
-    name: automation
-    image: opencord/cord-maas-automation:latest
-    state: absent
-
-- name: Stop Provisioner Container
-  become: yes
-  docker:
-    name: provisioner
-    image: opencord/cord-provisioner:latest
-    state: absent
-
-- name: Stop DHCP Harvester Container
-  become: yes
-  docker:
-    name: harvester
-    image: opencord/cord-dhcp-harvester:latest
-    state: absent
-
-- name: Stop IP Allocator Container
-  become: yes
-  docker:
-    name: allocator
-    image: opencord/cord-ip-allocator:latest
-    state: absent
+    - { name: "storage", image: "docker-registry:5000/consul:{{ docker.tag }}" }
+    - { name: "allocator", image: "docker-registry:5000/cord-maas-allocator:{{ docker.tag }}" }
+    - { name: "provisioner", image: "docker-registry:5000/cord-maas-provisioner:{{ docker.tag }}" }
+    - { name: "switchq", image: "docker-registry:5000/cord-maas-switchq:{{ docker.tag }}" }
+    - { name: "automation", image: "docker-registry:5000/cord-maas-automation:{{ docker.tag }}" }
+    - { name: "generator", image: "docker-registry:5000/cord-maas--generator:{{ docker.tag }}" }
+    - { name: "harvester", image: "docker-registry:5000/cord-maas-harvester:{{ docker.tag }}" }
 
 - name: MAAS Repository
   become: yes
   apt_repository:
-    repo: ppa:maas/stable
+    repo: "{{ maas_apt_repo | default('ppa:maas/stable') }}"
     update_cache: yes
     state: present
+    validate_certs: no
+  register: result
+  until: result | success
+  retries: 3
+  delay: 10
 
 - name: MAAS
   become: yes
   apt:
-    name: maas=1.9.3*
+    name: maas=1.9.*
     state: present
     force: yes
     update_cache: yes
     allow_unauthenticated: yes
+  async: 1800
+  poll: 30
+  register: status
+  ignore_errors: yes
+
+# next two tasks are to repair https://jira.opencord.org/browse/CORD-1839. Remove when fixed upstream
+- name: patch maas file to change filename from shim.efi.signed to shimx64.efi.signed
+  become: yes
+  patch:
+    src: uefi.py.diff
+    dest: /usr/lib/python2.7/dist-packages/provisioningserver/boot/uefi.py
+
+- name: restart maas-regiond to reload uefi.py
+  become: yes
+  service:
+    name: maas-clusterd
+    state: restarted
+  tags:
+    - skip_ansible_lint # need to restart this now, not as a handler
+
+- name: WARNING - We think MAAS install has hung. You may want to abort the install, re-image the head node, and start again.
+  pause:
+    minutes: 15
+  when: status|failed
+
+- name: WARNING - Questionable workaround for semi-broken MAAS install
+  become: yes
+  shell: "pkill dpkg; pkill frontend; dpkg --configure -a"
+  when: status|failed
 
 - name: MAAS Configuration Directory
   become: yes
@@ -73,7 +120,16 @@
     path: /etc/maas
     owner: maas
     group: maas
-    mode: 0755
+    mode: "0755"
+    state: directory
+
+- name: MAAS Automation Storage
+  become: yes
+  file:
+    path: /etc/maas/automation/storage
+    owner: maas
+    group: maas
+    mode: "0777"
     state: directory
 
 - name: Host Name Mapping File
@@ -83,7 +139,7 @@
     dest: /etc/maas/mappings.json
     owner: maas
     group: maas
-    mode: 0644
+    mode: "0644"
 
 - name: Verify MAAS admin User
   become: yes
@@ -93,7 +149,7 @@
 
 - name: MAAS admin User
   become: yes
-  command: maas-region-admin createadmin --username=admin --password=admin --email={{ maas.admin_email }}
+  command: maas-region-admin createadmin --username=admin --password={{ maas.admin_password }} --email={{ maas.admin_email }}
   when: maas_admin_user_exists.stdout == '0'
 
 - name: Verify MAAS User
@@ -101,6 +157,11 @@
   shell: maas-region-admin apikey --username={{ maas.user }} 2>/dev/null | wc -l
   register: maas_user_exists
   changed_when: false
+
+- name: Debug
+  become: yes
+  debug:
+    msg: "USER: {{maas.user}} and {{maas.user_password}} and {{maas_user_exists.stdout}}"
 
 - name: MAAS User
   become: yes
@@ -123,12 +184,6 @@
   command: virsh net-destroy default
   when: virsh_default_network_exists.stdout != '0'
 
-- name: Network Configuration
-  become: yes
-  script: files/generate_network_config.sh {{ interfaces.management }} {{ networks.management }} {{ networks.bridge }} {{ networks.bridge_name }}
-  register: network_config_changed
-  changed_when: network_config_changed.stdout == 'true'
-
 - name: Network Masquerading (NAT)
   become: yes
   template:
@@ -136,7 +191,7 @@
     dest: /etc/network/if-pre-up.d/nat
     owner: root
     group: root
-    mode: 0755
+    mode: "0755"
 
 - name: Ensure Masquerading (NAT)
   become: yes
@@ -144,84 +199,64 @@
   register: masq_changed
   changed_when: masq_changed.stdout == 'true'
 
-- name: VM Bridge
-  become: yes
-  template:
-    src: templates/create_bridge.j2
-    dest: /etc/network/if-pre-up.d/create_bridge_{{ networks.bridge_name }}
-    owner: root
-    group: root
-    mode: 0755
-
-- name: Activate VM Bridge
-  become: yes
-  command: /etc/network/if-pre-up.d/create_bridge_{{ networks.bridge_name }} report-changed
-  register: bridge_changed
-  changed_when: bridge_changed.stdout == 'true'
-
-- name: Management Interface
-  become: yes
-  shell: ifdown {{ interfaces.management }} && ifup {{ interfaces.management }}
-  when: network_config_changed.stdout == 'true'
-
 - name: Management Interface IP Address
   shell: ifconfig {{ interfaces.management }} 2>&1 | grep "inet addr:" | sed -e 's/.*:\([.0-9]*\)[ ]*Bcast.*/\1/g'
   register: mgmt_ip_address
   changed_when: false
   failed_when: mgmt_ip_address.rc != 0 or mgmt_ip_address.stdout == ""
 
-# Currently the onie image is being stored in **Dropbox** on a personal account, which is not really what we want to
-# have in production, but it works for the time being.
-- name: Switch Boot Resources
+- name: Download Switch Boot Images
   become: yes
   get_url:
-    url={{ item.url }}
-    dest=/var/www/html/{{ item.dest }}
-    owner=root
-    group=root
-    mode=0644
-    validate_certs=no
-  with_items:
-    - { url : "{{ accton_as6712_32x }}", dest : "onie-installer-x86_64-accton_as6712_32x-r0" }
-    - { url : "{{ accton_as5712_54x }}", dest : "onie-installer-x86_64-accton_as5712_54x-r0" }
+    url: "{{ item.url }}"
+    checksum: "{{ item.checksum }}"
+    dest: "{{ switch_image_dir }}/{{ item.name }}"
+    owner: "root"
+    group: "root"
+    mode: "0644"
+  with_items: "{{ switch_boot_images }}"
+  register: boot_image_download_result
+  until: boot_image_download_result|success
+  retries: 5
+  delay: 10
   tags:
     - switch_support
 
+- name: Link boot images to model files
+  become: yes
+  file:
+    state: link
+    src: "{{ switch_image_dir }}/{{ item.boot_image }}"
+    dest: "{{ switch_image_dir }}/{{ item.name }}"
+    owner: "root"
+    group: "root"
+    mode: "0644"
+  with_items: "{{ switch_models }}"
+  tags:
+    - switch_support
+
+- name: Disable Proxy Access To All
+  become: yes
+  replace:
+    dest: /usr/share/maas/maas-proxy.conf
+    regexp: '^(acl localnet src all.*)$'
+    replace: '# \1'
+
+- name: Only Allow Proxy Access To POD Management Network
+  become: yes
+  lineinfile:
+    insertafter: '^# acl localnet src all'
+    line: "acl localnet src {{ networks.management }} # Only allow the POD management network to use proxy"
+    dest: /usr/share/maas/maas-proxy.conf
+    state: present
+
 - name: Restart MAAS Services
-  become: yes
-  service:
-    name={{ item }}
-    state=restarted
-  with_items:
-    - maas-proxy
-    - maas-regiond
-    - maas-clusterd
-    - maas-dhcpd
-    - bind9
+  include: restart-maas.yml
   tags:
     - maas_restart
 
-- name: Wait for MAAS to Intialize (start)
-  pause:
-    seconds=30
-  changed_when: false
-  tags:
-    - maas_restart
-
-- name: MAAS Accepting API Requests
-  action: get_url url=http://{{ mgmt_ip_address.stdout }}/MAAS/api/1.0/maas/ dest=/tmp
-  register: api_test
-  until: api_test.status_code is defined and api_test.status_code == 403
-  retries: 5
-  delay: 60
-  failed_when: api_test.status_code is not defined or api_test.status_code != 403
-
-- name: Configure MAAS
-  become: yes
-  command: docker run docker-registry:5000/cord-maas-bootstrap:{{ docker.image_version }} --apikey='{{apikey.stdout}}' --sshkey='{{maas.user_sshkey}}' --url='http://{{mgmt_ip_address.stdout}}/MAAS/api/1.0' --network='{{networks.management}}' --interface='{{interfaces.management}}' --zone='administrative' --cluster='Cluster master' --domain='{{maas.domain}}' --bridge='{{networks.bridge_name}}' --bridge-subnet='{{networks.bridge}}'
-  register: maas_config_result
-  changed_when: maas_config_result.stdout.find("CHANGED") != -1
-  failed_when: "maas_config_result.rc != 0 or 'ERROR' in maas_config_result.stdout"
+- name: Ensure MAAS Configuration
+  include: config-maas.yml
 
 - name: Custom MAAS Configuration Template
   become: yes
@@ -230,26 +265,35 @@
     dest: "{{ item.dest }}"
     owner: maas
     group: maas
-    mode: 0644
+    mode: "0644"
   with_items:
     - { src: 'dhcpd.blacklist', dest: '/etc/dhcp' }
     - { src: 'dhcpd.reservations', dest: '/etc/dhcp' }
+    - { src: 'dhcpd.reservations.sample', dest: '/etc/dhcp' }
     - { src: 'dhcp_harvest.inc', dest: '/etc/bind/maas' }
-    - { src: 'cnames.inc', dest: '/etc/bind/maas' }
     - { src: 'named.conf.options.inside.maas', dest: '/etc/bind/maas' }
     - { src: 'dhcpd.conf.template', dest: '/etc/maas/templates/dhcp' }
     - { src: 'dhcp_harvest.inc', dest: '/etc/maas/templates/dns' }
     - { src: 'zone.template', dest: '/tmp' }
 
+- name: Customize cnames.inc file
+  become: yes
+  template:
+    src: cnames.inc.j2
+    dest: "/etc/bind/maas/cnames.inc"
+    owner: maas
+    group: maas
+    mode: "0644"
+
 - name: Ensure RNDC Listens
   become: yes
-  lineinfile: 
+  lineinfile:
     dest: /etc/bind/maas/named.conf.rndc.maas
     regexp: 'inet .* port 954'
     line: '        inet 0.0.0.0 port 954'
     state: present
 
-- name: Ensure ENDC Allows Trusted
+- name: Ensure RNDC Allows Trusted
   become: yes
   lineinfile:
     dest: /etc/bind/maas/named.conf.rndc.maas
@@ -269,7 +313,7 @@
     dest: /etc/resolvconf/resolv.conf.d/head
     state: present
     insertafter: EOF
-    line: "nameserver {{ mgmt_ip_address.stdout }}" 
+    line: "nameserver {{ mgmt_ip_address.stdout }}"
   register: ns_nameserver
 
 - name: Ensure Domain Search
@@ -286,12 +330,16 @@
   command: resolvconf -u
   when: ns_nameserver.changed or ns_search.changed
 
-- name: Ensure DNS
-  become: yes
-  service:
-    name=bind9
-    state=restarted
-  when: ns_nameserver.changed or ns_search.changed
+- name: Restart MAAS Services
+  include: restart-maas.yml
+  tags:
+    - maas_restart
+
+- name: Ensure Boot Resource Import Started
+  maas_boot_resource:
+    key: '{{apikey.stdout}}'
+    maas: 'http://{{mgmt_ip_address.stdout}}/MAAS/api/1.0'
+    state: import
 
 - name: Ensure VirtualBox Power Management
   include: virtualbox.yml
@@ -307,15 +355,12 @@
 
 - name: Ensure SSH keys for Ansible
   become: yes
-  command: cp /home/{{ ansible_user }}/.ssh/id_rsa /etc/maas/ansible/id_rsa
-
-- name: Ensure SSH Key Permissions
-  become: yes
-  file:
-    path: /etc/maas/ansible/id_rsa
+  copy:
+    src: "{{ pub_ssh_key_file_location }}/cord_rsa"
+    dest: "/etc/maas/ansible/id_rsa"
     owner: root
     group: root
-    mode: 0400
+    mode: "0400"
 
 - name: Initialize Interface Configuration Fact
   set_fact:
@@ -329,7 +374,7 @@
 
 - name: Default VirtualBox Host
   become: no
-  set_fact: 
+  set_fact:
     virtualbox_host: "{{ virtualbox.power_helper_host }}"
   when: virtualbox_support is defined
   changed_when: false
@@ -340,7 +385,28 @@
     virtualbox_host: "{{ discovered_vbox_host.stdout }}"
   when: virtualbox_support is defined and virtualbox_host == ''
   changed_when: false
-  
+
+- name: Ensure Secrets Directory
+  become: yes
+  file:
+    path: /etc/maas/secrets
+    state: directory
+    owner: root
+    group: docker
+    mode: "0755"
+
+- name: Ensure Automation Container Secrets
+  become: yes
+  template:
+    src: templates/{{ item }}.j2
+    dest: /etc/maas/secrets/{{ item }}
+    owner: root
+    group: docker
+    mode: "0440"
+  with_items:
+    - automation.env
+    - switchq.env
+
 - name: Custom Automation Compose Configurations
   become: yes
   template:
@@ -348,14 +414,49 @@
     dest: /etc/maas/{{ item }}
     owner: maas
     group: maas
-    mode: 0644
+    mode: "0644"
   with_items:
     - automation-compose.yml
-    - harvest-compose.yml
 
-- name: Automation
+- name: Kill Automation Containers
+  become: yes
+  command: docker-compose -f /etc/maas/{{ item }} kill
+  with_items:
+    - automation-compose.yml
+  changed_when: true
+
+- name: Remove Automation Containers
+  become: yes
+  command: docker-compose -f /etc/maas/{{ item }} rm -f
+  with_items:
+    - automation-compose.yml
+  changed_when: true
+
+- name: Pull Latest Automation Images
+  become: yes
+  command: docker-compose -f /etc/maas/{{ item }} pull
+  with_items:
+    - automation-compose.yml
+  changed_when: true
+
+- name: Start Automation
   become: yes
   command: docker-compose -f /etc/maas/{{ item }} up -d
   with_items:
     - automation-compose.yml
-    - harvest-compose.yml
+  changed_when: true
+
+- name: Wait For Image Download
+  shell: maas login cord http://localhost/MAAS/api/1.0/ "{{apikey.stdout}}" > /dev/null 2>&1 && maas cord boot-resources read | jq 'map(select(.type != "Synced"))' && maas  logout  cord > /dev/null 2>&1
+  register: images_synced
+  until: images_synced.stdout == "[]"
+  retries: 5
+  delay: 60
+  failed_when: images_synced.stdout != "[]"
+  changed_when: false
+
+- name: Ensure DNS
+  become: yes
+  service:
+    name=bind9
+    state=restarted

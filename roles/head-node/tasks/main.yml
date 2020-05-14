@@ -1,3 +1,19 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 - name: Ensure MAAS Ansible Config Directory
   become: yes
   file:
@@ -5,23 +21,26 @@
     owner=maas
     group=maas
     state=directory
+    mode="0755"
 
-- name: Ensure Ansible Compute Config Files
+- name: Ensure Ansible Roles
   become: yes
-  git:
-    repo={{ provision.location }}
-    dest=/tmp/ansible.maas
-    clone=yes
-    force=yes
-    update=yes
+  synchronize:
+    src: "{{ item }}"
+    dest: /etc/maas/ansible
+  with_items:
+    - roles
+    - library
 
-- name: Ensure Ansible Roles Exist
+- name: Ensure Role Permissions and Modes
   become: yes
-  command: cp -rf /tmp/ansible.maas/{{ provision.role_path }} /etc/maas/ansible
-
-- name: Ensure Ansible Roles Ownership
-  become: yes
-  file: dest=/etc/maas/ansible/{{ provision.role_path }} owner=maas group=maas recurse=yes
+  file:
+    path: /etc/maas/ansible/roles
+    owner: maas
+    group: maas
+    mode: u=rwX,g=rX,o=rX
+    state: directory
+    recurse: true
 
 - name: Ensure Ansible Provisioning Script
   become: yes
@@ -30,7 +49,7 @@
     src=files/{{ item }}
     owner=maas
     group=maas
-    mode=0755
+    mode="0755"
   with_items:
     - do-ansible
     - do-switch
@@ -42,16 +61,86 @@
     state=directory
     owner=maas
     group=maas
-    mode=0755
+    mode="0755"
 
-- name: Ensure Compute Node Playbook
+- name: Capture MAAS API Key
+  become: yes
+  command: maas-region-admin apikey --username={{ maas.user }}
+  register: apikey
+  changed_when: false
+
+- name: Ensure Compute and Switch Node Playbooks
   become: yes
   template:
-    src=files/{{ item }}
+    src={{ item }}.j2
     dest=/etc/maas/ansible/{{ item }}
     owner=maas
     group=maas
-    mode=0644
+    mode="0644"
   with_items:
     - compute-node.yml
     - switch-node.yml
+
+- name: Ensure Compute and Switch Variable Directory
+  become: yes
+  file:
+    path=/etc/maas/ansible/vars
+    owner=maas
+    group=maas
+    mode="0755"
+    state=directory
+
+- name: Ensure Compute and Switch Node Variables
+  become: yes
+  template:
+    src=templates/compute-node-vars.yml.j2
+    dest=/etc/maas/ansible/vars/compute-node-vars.yml
+    owner=maas
+    group=maas
+    mode="0644"
+
+- name: Ensure Dynamic Inventory Script
+  become: yes
+  template:
+    src=templates/pod-inventory
+    dest=/etc/maas/ansible/pod-inventory
+    owner=maas
+    group=maas
+    mode="0755"
+
+- name: Copy CORD Utility Scripts
+  become: yes
+  copy:
+    src=files/commands/{{ item }}
+    dest=/usr/local/bin/{{ item }}
+    owner=root
+    group=root
+    mode="0755"
+  with_items:
+    - cord
+    - cord-harvest
+    - cord-prov
+    - cord-switch
+    - cord-generate
+    - cord-registry
+
+- name: Ensure SSH Key Storage
+  become: yes
+  file:
+    path: /etc/maas/.ssh
+    mode: "0755"
+    owner: maas
+    group: maas
+    state: directory
+
+- name: Copy SSH Key Pair for POD
+  become: yes
+  copy:
+    src: "{{pub_ssh_key_file_location}}/{{item}}"
+    dest: /etc/maas/.ssh/{{item}}
+    owner: maas
+    group: maas
+    mode: "0644"
+  with_items:
+    - cord_rsa
+    - cord_rsa.pub

@@ -1,8 +1,21 @@
+// Copyright 2016 Open Networking Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
-	"log"
 	"os/exec"
+	"time"
 )
 
 type WorkRequest struct {
@@ -20,10 +33,11 @@ type Worker struct {
 }
 
 type StatusMsg struct {
-	Request *WorkRequest `json:"request"`
-	Worker  int          `json:"worker"`
-	Status  TaskStatus   `json:"status"`
-	Message string       `json:"message"`
+	Request   *WorkRequest `json:"request"`
+	Worker    int          `json:"worker"`
+	Status    TaskStatus   `json:"status"`
+	Message   string       `json:"message"`
+	Timestamp int64        `json:"timestamp"`
 }
 
 func NewWorker(id int, workerQueue chan chan WorkRequest, statusChan chan StatusMsg) Worker {
@@ -48,20 +62,22 @@ func (w *Worker) Start() {
 			select {
 			case work := <-w.Work:
 				// Receive a work request.
-				w.StatusChan <- StatusMsg{&work, w.ID, Running, ""}
-				log.Printf("[debug] RUN: %s %s %s %s %s %s",
+				w.StatusChan <- StatusMsg{&work, w.ID, Running, "", time.Now().Unix()}
+				log.Debugf("RUN: %s %s %s %s %s %s",
 					work.Script, work.Info.Id, work.Info.Name,
 					work.Info.Ip, work.Info.Mac, work.Role)
 				err := exec.Command(work.Script, work.Info.Id, work.Info.Name,
 					work.Info.Ip, work.Info.Mac, work.Role).Run()
 				if err != nil {
-					w.StatusChan <- StatusMsg{&work, w.ID, Failed, err.Error()}
+					w.StatusChan <- StatusMsg{&work, w.ID, Failed, err.Error(),
+						time.Now().Unix()}
 				} else {
-					w.StatusChan <- StatusMsg{&work, w.ID, Complete, ""}
+					w.StatusChan <- StatusMsg{&work, w.ID, Complete, "",
+						time.Now().Unix()}
 				}
 			case <-w.QuitChan:
 				// We have been asked to stop.
-				log.Printf("worker%d stopping\n", w.ID)
+				log.Infof("worker%d stopping\n", w.ID)
 				return
 			}
 		}
@@ -108,7 +124,7 @@ func (d *Dispatcher) Dispatch(info *RequestInfo, role string, script string) err
 func (d *Dispatcher) Start() {
 	// Now, create all of our workers.
 	for i := 0; i < d.NumWorkers; i++ {
-		log.Printf("Creating worker %d", i)
+		log.Infof("Creating worker %d", i)
 		worker := NewWorker(i, d.WorkerQueue, d.StatusChan)
 		worker.Start()
 	}
@@ -117,18 +133,24 @@ func (d *Dispatcher) Start() {
 		for {
 			select {
 			case work := <-d.WorkQueue:
-				log.Println("[debug] Received work requeust")
+				log.Debugf("Received work requeust")
+				d.StatusChan <- StatusMsg{&work, -1, Pending, "", time.Now().Unix()}
 				go func() {
-					d.StatusChan <- StatusMsg{&work, -1, Pending, ""}
 					worker := <-d.WorkerQueue
 
-					log.Println("[debug] Dispatching work request")
+					log.Debugf("Dispatching work request")
 					worker <- work
 				}()
 			case update := <-d.StatusChan:
-				d.Storage.Put(update.Request.Info.Id, update)
+				err := d.Storage.Put(update.Request.Info.Id, update)
+				if err != nil {
+					log.Errorf("Unable to update storage with status for '%s' : %s",
+						update.Request.Info.Id, err)
+				} else {
+					log.Debugf("Storage updated for '%s'", update.Request.Info.Id)
+				}
 			case <-d.QuitChan:
-				log.Println("[info] Stopping dispatcher")
+				log.Infof("Stopping dispatcher")
 				return
 			}
 		}

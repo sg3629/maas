@@ -1,0 +1,99 @@
+
+{#
+Copyright 2017-present Open Networking Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+#}
+
+
+{% if compute_node.password is defined and compute_node.password != omit %}
+password_compute_node: '{{ compute_node.password }}'
+{% endif %}
+{% if compute_node.fabric.include.names is defined and compute_node.fabric.include.names != omit %}
+fabric_include_names: '{{ compute_node.fabric.include.names }}'
+{% endif %}
+{% if compute_node.fabric.include.module_types is defined and compute_node.fabric.include.module_types != omit %}
+fabric_include_module_types: '{{ compute_node.fabric.include.module_types }}'
+{% endif %}
+{% if compute_node.fabric.include.bus_types is defined and compute_node.fabric.include.bus_types != omit %}
+fabric_include_bus_types: '{{ compute_node.fabric.include.bus_types }}'
+{% endif %}
+{% if compute_node.fabric.exclude.names is defined and compute_node.fabric.exclude.names != omit %}
+fabric_exclude_names: '{{ compute_node.fabric.exclude.names }}'
+{% endif %}
+{% if compute_node.fabric.exclude.module_types is defined and compute_node.fabric.exclude.module_types != omit %}
+fabric_exclude_module_types: '{{ compute_node.fabric.exclude.module_types }}'
+{% endif %}
+{% if compute_node.fabric.exclude.bus_types is defined and compute_node.fabric.exclude.bus_types != omit %}
+fabric_exclude_bus_types: '{{ compute_node.fabric.exclude.bus_types }}'
+{% endif %}
+{% if compute_node.fabric.ignore.names is defined and compute_node.fabric.ignore.names != omit %}
+fabric_ignore_names: '{{ compute_node.fabric.ignore.names }}'
+{% endif %}
+{% if compute_node.fabric.ignore.module_types is defined and compute_node.fabric.ignore.module_types != omit %}
+fabric_ignore_module_types: '{{ compute_node.fabric.ignore.module_types }}'
+{% endif %}
+{% if compute_node.fabric.ignore.bus_types is defined and compute_node.fabric.ignore.bus_types != omit %}
+fabric_ignore_bus_types: '{{ compute_node.fabric.ignore.bus_types }}'
+{% endif %}
+{% if compute_node.management.include.names is defined and compute_node.management.include.names != omit %}
+management_include_names: '{{ compute_node.management.include.names }}'
+{% endif %}
+{% if compute_node.management.include.module_types is defined and compute_node.management.include.module_types != omit %}
+management_include_module_types: '{{ compute_node.management.include.module_types }}'
+{% endif %}
+{% if compute_node.management.include.bus_types is defined and compute_node.management.include.bus_types != omit %}
+management_include_bus_types: '{{ compute_node.management.include.bus_types }}'
+{% endif %}
+{% if compute_node.management.exclude.names is defined and compute_node.management.exclude.names != omit %}
+management_exclude_names: '{{ compute_node.management.exclude.names }}'
+{% endif %}
+{% if compute_node.management.exclude.module_types is defined and compute_node.management.exclude.module_types != omit %}
+management_exclude_module_types: '{{ compute_node.management.exclude.module_types }}'
+{% endif %}
+{% if compute_node.management.exclude.bus_types is defined and compute_node.management.exclude.bus_types != omit %}
+management_exclude_bus_types: '{{ compute_node.management.exclude.bus_types }}'
+{% endif %}
+{% if compute_node.management.ignore.names is defined and compute_node.management.ignore.names != omit %}
+management_ignore_names: '{{ compute_node.management.ignore.names }}'
+{% endif %}
+{% if compute_node.management.ignore.module_types is defined and compute_node.management.ignore.module_types != omit %}
+management_ignore_module_types: '{{ compute_node.management.ignore.module_types }}'
+{% endif %}
+{% if compute_node.management.ignore.bus_types is defined and compute_node.management.ignore.bus_types != omit %}
+management_ignore_bus_types: '{{ compute_node.management.ignore.bus_types }}'
+{% endif %}
+{% if ubuntu_apt_repo is defined %}
+ubuntu_apt_repo: '{{ ubuntu_apt_repo }}'
+{% endif %}
+{% if ubuntu_updates_apt_repo is defined %}
+ubuntu_updates_apt_repo: '{{ ubuntu_updates_apt_repo }}'
+{% endif %}
+{% if docker_apt_repo is defined %}
+docker_apt_repo: '{{ docker_apt_repo }}'
+{% endif %}
+{% if java_apt_repo is defined %}
+java_apt_repo: '{{ java_apt_repo }}'
+{% endif %}
+{% if ansible_apt_repo is defined %}
+ansible_apt_repo: '{{ ansible_apt_repo }}'
+{% endif %}
+{% if maas_apt_repo is defined %}
+maas_apt_repo: '{{ maas_apt_repo }}'
+{% endif %}
+{% if dell_apt_repo is defined %}
+dell_apt_repo: '{{ dell_apt_repo }}'
+{% endif %}
+{% if juju_apt_repo is defined %}
+juju_apt_repo: '{{ juju_apt_repo }}'
+{% endif %}

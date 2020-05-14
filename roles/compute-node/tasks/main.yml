@@ -1,3 +1,19 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 ---
 - name: Verify Manditory Variables
   fail: msg="Variable '{{ item }}' is not defined"
@@ -7,15 +23,52 @@
   tags:
     - interface_config
 
+- name: Verify Network Bits on Network Specifications
+  fail: msg="Network specification '{{ item }}' must include network bits"
+  when: "item != 'dhcp' and item != 'manual' and item | match('^([0-9]{1,3}.){3}[0-9]{1,3}$')"
+  with_items:
+    - "{{ compute_node.addresses.fabric }}"
+    - "{{ compute_node.addresses.management }}"
+    - "{{ compute_node.addresses.external }}"
+
 - name: Applications
   become: yes
-  apt: name={{ item }} state=latest force=yes
+  apt: name={{ item }} state=present force=yes
   with_items:
-    - build-essential
-    - git
-    - python-pip
-    - ifenslave-2.6
-    - bridge-utils
+    - whois
+    - build-essential=11.6*
+    - git=1:1.9.*
+    - python-pip=1.5.4*
+    - ifenslave-2.6=2.4*
+    - bridge-utils=1.5-*
+    - ethtool=1:3.13*
+    - minicom=2.7*
+    - curl=7.35.*
+    - jq=1.3*
+
+- name: Validate Encyrpted Compute Node Password
+  set_fact:
+    already_encrypted: "{{compute_node.password.startswith('enc:')}}"
+
+# If the compute_node.password begins with 'enc:' then it is an
+# encyrpted password, which is what we need so we are done. Thus
+# if it is not encrypted then we have to encrypt it
+
+- name: Encyrpt Compute Node Password
+  command: "mkpasswd --method=sha-512 {{compute_node.password}}"
+  register: encrypted
+  changed_when: false
+  when: "not already_encrypted"
+
+- name: Extract Encrypted Compute Node Password
+  set_fact:
+    encrypted_password: "enc:{{encrypted.stdout}}"
+  when: "not already_encrypted"
+
+- name: Copy Encrypted Compute Node Password
+  set_fact:
+    encrypted_password: "{{compute_node.password}}"
+  when: "already_encrypted"
 
 - name: Ensure Docker Insecure Repository
   become: yes
@@ -25,50 +78,68 @@
     insertafter: '^DOCKER_OPTS'
   register: docker_config
 
+- name: Ensure Docker Registry Mirror
+  become: yes
+  lineinfile:
+    dest: /etc/default/docker
+    line: 'DOCKER_OPTS="$DOCKER_OPTS --registry-mirror=http://docker-registry:5001"'
+    insertafter: '^DOCKER_OPTS'
+  register: docker_config_mirror
+
 - name: Docker Restart
   become: yes
   service:
     name=docker
     state=restarted
-  when: docker_config.changed
+  when: docker_config.changed or docker_config_mirror.changed
 
 - name: Ensure Docker Ansible Support
   become: yes
   pip:
-    name=docker-py
-    version=0.3.1
+    name: "docker==3.2.1"
 
 - name: Set Default Password
   become: yes
   user:
-    name={{ ansible_user }}
-    password="$6$TjhJuOgh8xp.v$z/4GwFbn5koVmkD6Ex9wY7bgP7L3uP2ujZkZSs1HNdzQdz9YclbnZH9GvqMC/M1iwC0MceL05.13HoFz/bai0/"
-  when: '"{{ ansible_user }}" == "ubuntu"'
+    name: "{{ ansible_user_id }}"
+    password: "{{encrypted_password.split(':',1)[1]}}"
+  when: '"{{ ansible_user_id }}" == "ubuntu"'
+  tags:
+    - set_compute_node_password
 
 - name: Authorize SSH Key
   become: yes
   authorized_key:
-    key="{{ pub_ssh_key }}"
-    user={{ ansible_user }}
-    state=present
+    key: "{{ pub_ssh_key }}"
+    user: "{{ ansible_user_id }}"
+    state: present
 
 - name: Verify Private SSH Key
   become: yes
   stat:
-    path=/home/{{ ansible_user }}/.ssh/id_rsa
+    path=/home/{{ ansible_user_id }}/.ssh/id_rsa
   register: private_key
 
-- name: Ensure SSH Key
+- name: Ensure SSH Key Pair
   become: yes
   copy:
-    src=files/{{ item }}
-    dest=/home/{{ ansible_user }}/.ssh/{{ item }}
-    owner={{ ansible_user }}
-    group={{ ansible_user }}
-    mode=0600
+    src: "{{pub_ssh_key_file_location}}/{{item.src}}"
+    dest: "{{ansible_env['PWD']}}/.ssh/{{item.dest}}"
+    owner: "{{ ansible_user_id }}"
+    group: "docker"
+    mode: "0600"
   with_items:
-    - id_rsa
-    - id_rsa.pub
+    - { "src": "cord_rsa", "dest": "cord_rsa" }
+    - { "src": "cord_rsa.pub", "dest": "cord_rsa.pub" }
+
+- name: Ensure SSH config
+  become: yes
+  copy:
+    src: "files/{{item}}"
+    dest: "{{ansible_env['PWD']}}/.ssh/{{item}}"
+    owner: "{{ ansible_user_id }}"
+    mode: "0600"
+  with_items:
     - config
 
 - name: Ensure CORD SUDO
@@ -78,15 +149,35 @@
     dest=/etc/sudoers.d/99-cord-sudoers
     owner=root
     group=root
-    mode=0600
+    mode="0600"
 
-- name: Verify Mellanox 40Gb NIC
-  shell: /usr/bin/lspci | grep "Ethernet controller" | grep -c ConnectX-3 || true
-  register: mlx_nic_present
+- name: Ensure Utility Scripts
+  become: yes
+  copy:
+    src=files/{{ item }}
+    dest=/usr/local/bin/{{ item }}
+    owner=root
+    group=root
+    mode="0755"
+  with_items:
+    - delete-fabric-config
+    - delete-node-prov-state
+    - docker-ip
+    - fabric-pingall
+    - get-fabric-config
+    - get-node-prov-state
+    - remove-xos-components
+    - remove-maas-components
+    - post-fabric-config
+    - pull-latest-docker-images
+
+- name: Verify Mellanox NICs
+  shell: /usr/bin/lspci | grep "Ethernet controller" | grep -c Mellanox || true
+  register: mlnx_nic_present
   changed_when: False
 
 - name: Verify Intel 40Gb NIC
-  shell: /usr/bin/lspci | grep "Ethernet controller" | grep -c "XL710 for 40GbE QSFP+" || true
+  shell: /usr/bin/lspci | grep "Ethernet controller" | grep -c -E "XL710 for 40GbE QSFP+|X710 for 10GbE SFP+" || true
   register: intel_nic_present
   changed_when: False
 
@@ -99,32 +190,24 @@
   tags:
     - interface_config
 
-- name: Verify mlx4 Driver
-  command: modinfo --field=version mlx4_core
-  register: mlx4_version
-  when: mlx_nic_present.stdout != "0"
+- name: Verify Mellanox Driver
+  command: modinfo --field=version mlx5_core
+  register: mlnx5_version
+  when: mlnx_nic_present.stdout != "0"
   changed_when: False
   failed_when: False
   tags:
     - interface_config
 
-- name: Update mlx4 Driver
-  include: tasks/mlx4_driver.yml
-  when: mlx_nic_present.stdout != "0" and mlx4_version.stdout != '3.1-1.0.4'
+- name: Update Mellanox Driver
+  include: mlnx_driver.yml
+  when: mlnx_nic_present.stdout != "0" and mlnx5_version.stdout != '4.0-2.0.0'
   tags:
     - interface_config
 
 - name: Update i40e Driver
-  include: tasks/i40e_driver.yml
+  include: i40e_driver.yml
   when: intel_nic_present.stdout != "0" and i40e_version.stdout != '1.4.25'
-  tags:
-    - interface_config
-
-- name: Consistent Interface Naming
-  become: yes
-  script: files/rename_ifaces.sh "{{ compute_node.interfaces.fabric }}" "{{ compute_node.addresses.fabric }}" "{{ compute_node.interfaces.external }}" "{{ compute_node.addresses.external }}" "{{ compute_node.interfaces.management }}" "{{ compute_node.addresses.management }}"
-  register: ifaces_changed
-  changed_when: ifaces_changed.stdout.find("true") != -1
   tags:
     - interface_config
 
@@ -139,25 +222,8 @@
    - rtc
    - bonding
 
-- name: Reboot Required
+- name: Ensure Network Configuration
   become: yes
-  command: /sbin/reboot
-  async: 0
-  poll: 0
-  ignore_errors: true
-  when: ifaces_changed.stdout.find("true") != -1
+  include: networking.yml
   tags:
     - interface_config
-    - reboot
-
-- name: Ensure Port Defined
-  set_fact:
-    ansible_ssh_port: 22
-  when: ansible_ssh_port is not defined
-
-- name: Wait For Restart
-  local_action: wait_for port={{ ansible_ssh_port }} host={{ inventory_hostname }} search_regex=OpenSSH delay=30 timeout=600 connect_timeout=15
-  when: ifaces_changed.stdout.find("true") != -1
-  tags:
-    - interface_config
-    - reboot

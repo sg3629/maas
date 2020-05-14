@@ -1,0 +1,41 @@
+
+# Copyright 2017-present Open Networking Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+pub_ssh_key_file_location: "{{ pub_ssh_key_location | default ('/etc/maas/.ssh') }}"
+pub_ssh_key: "{{ lookup('file', pub_ssh_key_file_location+'/cord_rsa.pub') }}"
+
+deb_tmp_inst_dir: "/tmp/"
+
+platforms:
+  accton_olts:
+    file_url: "http://onos-fabric/voltha-bal.deb"
+    file_name: "voltha-bal.deb"
+    names:
+      - "x86-64-accton-asxvolt16-r0"
+  accton_switches:
+    file_url: "https://github.com/onfsdn/atrium-docs/blob/master/16A/ONOS/builds/ofdpa_3.0.5.5%2Baccton1.7-1_amd64.deb?raw=true"
+    file_name: "ofdpa_3.0.5.5+accton1.7-1_amd64.deb"
+    checksum: "sha256:db228b6e79fb15f77497b59689235606b60abc157e72fc3356071bcc8dc4c01f"
+    names:
+      - "x86-64-accton-as5712-54x-r0"
+      - "x86-64-accton-as5812-54x-r0"
+      - "x86-64-accton-as6712-32x-r0"
+  quanta_switches:
+    file_url: "https://github.com/onfsdn/atrium-docs/blob/master/16A/ONOS/builds/ofdpa-ly8_0.3.0.5.0-EA5-qct-01.01_amd64.deb?raw=true"
+    file_name: "ofdpa-ly8_0.3.0.5.0-EA5-qct-01.01_amd64.deb"
+    checksum: "sha256:f8201530b1452145c1a0956ea1d3c0402c3568d090553d0d7b3c91a79137da9e"
+    names:
+      - "x86-64-quanta-ly8-rangeley-r0"
